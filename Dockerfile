@@ -22,12 +22,10 @@ RUN apt-get update -qq && apt-get install -y -qq \
 # Atualiza ferramentas Python fundamentais
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Instala gsplat pré-compilado para PyTorch 2.4 e CUDA 12.4 (evita compilação de 20 min)
-RUN pip install --no-cache-dir gsplat --index-url https://docs.gsplat.studio/whl/pt24cu124
-
-# Instala nerfstudio auditado e bibliotecas do handler (RunPod e Boto3 para R2)
+# Instalação com versões auditadas (nerfstudio 1.1.5, gsplat 1.4.0, runpod e boto3 para Cloudflare R2)
 RUN pip install --no-cache-dir \
     nerfstudio==1.1.5 \
+    gsplat==1.4.0 \
     runpod \
     boto3 \
     requests
