@@ -46,7 +46,7 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/3dgs-serverless:v2
+            ${{ secrets.DOCKERHUB_USERNAME }}/3dgs-serverless:v3
             ${{ secrets.DOCKERHUB_USERNAME }}/3dgs-serverless:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -10,24 +10,41 @@ import sys
 import time
 import requests
 
+# Carrega variáveis do arquivo .env automaticamente (se existir)
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+
 # ==============================================================================
-# CONFIGURAÇÕES (Preencha aqui ou configure via variáveis de ambiente)
+# CONFIGURAÇÕES (Lidas do .env ou variáveis de ambiente)
 # ==============================================================================
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "SUA_API_KEY_DO_RUNPOD")
-ENDPOINT_ID = os.environ.get("ENDPOINT_ID", "SEU_ENDPOINT_ID")  # Exemplo: abc123xyz
+ENDPOINT_ID = os.environ.get("ENDPOINT_ID", "SEU_ENDPOINT_ID")
 
 # Exemplo de payload com URLs hospedadas no Cloudflare R2 ou qualquer storage HTTP/S
 DEFAULT_PAYLOAD = {
     "input": {
-        "project_id": f"teste_sala_{int(time.time())}",
+        "project_id": f"teste_smoke_{int(time.time())}",
         "video_urls": [
-            # Substitua pelas URLs reais dos seus vídeos no Cloudflare R2:
-            "https://meu-storage-r2.com/videos/video_frente.mp4",
-            "https://meu-storage-r2.com/videos/video_tras.mp4",
+            # Coloque a URL pública ou assinada do vídeo hospedado (ex: no Cloudflare R2)
+            "https://pub-b3194146ed164aeba6f85c06aef29aac.r2.dev/transient/manual_17895_20260509_231111.mp4"
         ],
-        # Parâmetros opcionais de ajuste fino:
-        "fps": 2,               # Frames por segundo extraídos de cada vídeo
-        "max_iterations": 30000 # Iterações de treino do splatfacto (30k é o padrão de alta fidelidade)
+        # Parâmetros otimizados para teste rápido de fumaça (smoke test)
+        "fps": 2,               # 2 frames por segundo
+        "max_iterations": 7000  # 7k para teste rápido (ou 30000 para qualidade total de produção)
+    },
+    # ⚠️ CRÍTICO: Define timeout de 4h para evitar o default do RunPod de 10 min (600s)
+    "policy": {
+        "executionTimeout": 4 * 60 * 60 * 1000,   # 4 horas em ms
+        "ttl": 6 * 60 * 60 * 1000                # 6 horas de vida total em ms
     }
 }
 # ==============================================================================
@@ -69,7 +86,7 @@ def run_pipeline(payload: dict = None):
 
     print(f"✅ Job criado com sucesso! ID: {job_id}")
     print("⏳ Aguardando processamento...")
-    print("   (Extração de frames -> COLMAP SfM -> Treinamento 3DGS -> Exportação .ply)")
+    print("   (Download -> Extração frames -> COLMAP SfM -> Treinamento 3DGS -> Exportação .ply -> R2)")
 
     status_url = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/status/{job_id}"
     start_time = time.time()
@@ -94,7 +111,7 @@ def run_pipeline(payload: dict = None):
             total_time = round((time.time() - start_time) / 60, 2)
             print("\n" + "=" * 60)
             print(f"🎉 SUCESSO! Modelo 3DGS gerado em {total_time} minutos.")
-            print(f"📦 Arquivo: {output.get('object_name')}")
+            print(f"📦 Arquivo: {output.get('object_name') or output.get('object_key')}")
             print(f"📊 Tamanho: {output.get('size_mb')} MB")
             print(f"🔗 Link para Download (Válido por 7 dias):")
             print(f"   {output.get('download_url')}")
@@ -109,6 +126,8 @@ def run_pipeline(payload: dict = None):
             print("\n" + "=" * 60)
             print("❌ Falha no processamento do Job no RunPod.")
             print(f"Erro reportado: {res.get('error')}")
+            if res.get("trace"):
+                print(f"Trace:\n{res.get('trace')}")
             print("Consulte a aba Serverless > Requests no painel do RunPod para ver os logs completos do container.")
             print("=" * 60)
             break

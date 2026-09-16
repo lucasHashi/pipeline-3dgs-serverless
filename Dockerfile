@@ -48,6 +48,23 @@ RUN pip install --no-cache-dir \
     "boto3==1.*" \
     "requests==2.*"
 
+# Patch de compatibilidade: COLMAP 3.10+ renomeou flags SiftExtraction/SiftMatching para FeatureExtraction/FeatureMatching
+# 1) Patch no código python do nerfstudio
+RUN python -c "\
+import nerfstudio.process_data.colmap_utils as u, pathlib;\
+p = pathlib.Path(u.__file__);\
+c = p.read_text();\
+c = c.replace('--SiftExtraction.use_gpu', '--FeatureExtraction.use_gpu');\
+c = c.replace('--SiftMatching.use_gpu', '--FeatureMatching.use_gpu');\
+p.write_text(c);\
+print('>>> Nerfstudio colmap_utils patched successfully')\
+"
+
+# 2) Wrapper defensivo em /usr/local/bin/colmap caso qualquer chamada ainda passe as flags legadas
+RUN mv /usr/local/bin/colmap /usr/local/bin/colmap_real && \
+    printf '#!/bin/bash\nargs=()\nfor arg in "$@"; do\n  case "$arg" in\n    --SiftExtraction.use_gpu*)\n      args+=("${arg/--SiftExtraction.use_gpu/--FeatureExtraction.use_gpu}")\n      ;;\n    --SiftMatching.use_gpu*)\n      args+=("${arg/--SiftMatching.use_gpu/--FeatureMatching.use_gpu}")\n      ;;\n    *)\n      args+=("$arg")\n      ;;\n  esac\ndone\nexec /usr/local/bin/colmap_real "${args[@]}"\n' > /usr/local/bin/colmap && \
+    chmod +x /usr/local/bin/colmap
+
 # Pré-compila a extensão CUDA do gsplat DENTRO da imagem
 # Archs: 8.0 (A100), 8.6 (A6000/3090), 8.9 (4090/L40/A5000), 9.0 (H100)
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
