@@ -28,20 +28,21 @@ mkdir -p "$RAW_DIR" "$FORMATTED_DIR" "$OUTPUT_DIR" "$EXPORT_DIR"
 # ---- 1) Extração de frames de N vídeos ----
 echo ">>> [1/4] Extraindo frames dos vídeos a ${FPS_RATE} fps..."
 idx=1
-shopt -s nullglob nocaseglob
 video_count=0
 
-for video in "$INPUT_DIR"/*.{mp4,mov,mkv,avi,webm,MP4,MOV,MKV}; do
-  if [ -f "$video" ]; then
-    ((video_count++)) || true
-    vname=$(basename "${video%.*}" | tr -cd '[:alnum:]_-')
-    echo "    -> Processando vídeo ${idx}: $(basename "$video") -> prefixo vid${idx}_${vname}_"
-    ffmpeg -v error -i "$video" -vf "fps=${FPS_RATE}" -q:v 2 \
-      "${RAW_DIR}/vid${idx}_${vname}_%05d.jpg"
-    ((idx++)) || true
-  fi
+for video in "$INPUT_DIR"/*; do
+  [ -f "$video" ] || continue
+  case "${video,,}" in
+    *.mp4|*.mov|*.mkv|*.avi|*.webm) ;;
+    *) continue ;;
+  esac
+  ((video_count++)) || true
+  vname=$(basename "${video%.*}" | tr -cd '[:alnum:]_-')
+  echo "    -> Processando vídeo ${idx}: $(basename "$video") -> prefixo vid${idx}_${vname}_"
+  ffmpeg -v error -i "$video" -vf "fps=${FPS_RATE}" -q:v 2 \
+    "${RAW_DIR}/vid${idx}_${vname}_%05d.jpg"
+  ((idx++)) || true
 done
-shopt -u nullglob nocaseglob
 
 if [ "$video_count" -eq 0 ]; then
   echo "ERRO: Nenhum vídeo encontrado em ${INPUT_DIR}."
