@@ -1,0 +1,62 @@
+# Environment & Secrets
+.env
+*.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+venv_3dgs/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Pipeline temporaries & artifacts
+input/
+output/
+raw_frames/
+dataset_formatado/
+export/
+*.ply
+*.splat
+*.ckpt
+
+# Media files
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
