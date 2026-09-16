@@ -2,13 +2,13 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths-ignore:
       - '**.md'
       - '.gitignore'
       - '.env.example'
       - 'client_test.py'
-  workflow_dispatch:
+  workflow_dispatch:        # permite rebuild manual pela aba Actions
 
 jobs:
   build:
@@ -19,18 +19,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Free Disk Space (Aggressive 50GB+ cleanup)
-        run: |
-          echo ">>> Espaço antes da limpeza:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          echo ">>> Espaço após a limpeza:"
-          df -h /
+      - name: Free Disk Space (~50 GB liberados para o build)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -42,7 +40,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and Push Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -50,3 +48,5 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/3dgs-serverless:v1
             ${{ secrets.DOCKERHUB_USERNAME }}/3dgs-serverless:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

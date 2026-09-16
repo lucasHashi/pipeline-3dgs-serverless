@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import time
+import traceback
 import urllib.request
 import boto3
 from botocore.client import Config
@@ -14,6 +15,23 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("AWS_ACC
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY")
 R2_REGION = os.environ.get("R2_REGION") or os.environ.get("AWS_REGION", "auto")
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")  # Ex: https://pub-xxx.r2.dev ou https://cdn.seudominio.com
+
+WORK_DIRS = [
+    "/workspace/input",
+    "/workspace/raw_frames",
+    "/workspace/dataset_formatado",
+    "/workspace/output",
+    "/workspace/export",
+]
+
+
+def cleanup():
+    """Workers serverless são reutilizados — nunca deixe lixo do job anterior."""
+    for d in WORK_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+    result_ply = "/workspace/resultado.ply"
+    if os.path.exists(result_ply):
+        os.remove(result_ply)
 
 
 def get_s3_client():
@@ -28,7 +46,7 @@ def get_s3_client():
         endpoint_url=R2_ENDPOINT,
         aws_access_key_id=R2_ACCESS_KEY_ID,
         aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        region_name=R2_REGION,
+        region_name=R2_REGION,                       # obrigatório; R2 ignora o valor
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
 
@@ -42,7 +60,7 @@ def upload_to_storage(file_path: str, object_name: str) -> dict:
 
     s3.upload_file(file_path, R2_BUCKET, object_name, ExtraArgs=extra_args)
 
-    # URL pré-assinada válida por 7 dias (604800 segundos)
+    # URL pré-assinada válida por 7 dias (máximo permitido pelo R2: 604800 s)
     presigned_url = s3.generate_presigned_url(
         "get_object",
         Params={"Bucket": R2_BUCKET, "Key": object_name},
@@ -55,9 +73,10 @@ def upload_to_storage(file_path: str, object_name: str) -> dict:
         "size_bytes": file_size,
         "size_mb": round(file_size / (1024 * 1024), 2),
         "download_url": presigned_url,
+        "url_expires_in": "7 dias",
     }
 
-    # Se houver um domínio público R2 configurado, inclui o link direto
+    # Se houver um domínio público R2 configurado, inclui o link direto permanente
     if R2_PUBLIC_URL:
         clean_base = R2_PUBLIC_URL.rstrip("/")
         result["public_url"] = f"{clean_base}/{object_name}"
@@ -69,7 +88,7 @@ def upload_to_storage(file_path: str, object_name: str) -> dict:
 def download_videos(urls: list, input_dir: str = "/workspace/input") -> list:
     os.makedirs(input_dir, exist_ok=True)
 
-    # Limpeza de arquivos anteriores
+    # Limpeza de arquivos anteriores neste diretório
     for f in os.listdir(input_dir):
         fp = os.path.join(input_dir, f)
         if os.path.isfile(fp):
@@ -87,23 +106,34 @@ def download_videos(urls: list, input_dir: str = "/workspace/input") -> list:
                 ext = candidate_ext
                 break
 
-        dest = os.path.join(input_dir, f"video_{idx}{ext}")
-        print(f"    [{idx + 1}/{len(urls)}] Baixando de {url[:60]}... -> {os.path.basename(dest)}")
+        dest = os.path.join(input_dir, f"video_{idx:02d}{ext}")
+        print(f"    [{idx + 1}/{len(urls)}] {url[:80]}... -> {os.path.basename(dest)}", flush=True)
 
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (RunPod-Serverless-3DGS/1.0)",
-                "Accept": "*/*",
-            },
-        )
+        last_err = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (RunPod-Serverless-3DGS/1.0)",
+                        "Accept": "*/*",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=120) as response, open(dest, "wb") as out_file:
+                    shutil.copyfileobj(response, out_file, length=1024 * 1024)
 
-        with urllib.request.urlopen(req) as response, open(dest, "wb") as out_file:
-            # Streaming em blocos de 1MB para não estourar a memória RAM
-            shutil.copyfileobj(response, out_file, length=1024 * 1024)
+                file_size = os.path.getsize(dest)
+                if file_size < 100_000:
+                    raise ValueError(f"arquivo muito pequeno ({file_size} bytes) — URL inválida?")
 
-        dest_size = os.path.getsize(dest)
-        print(f"    -> Concluído ({round(dest_size / (1024 * 1024), 2)} MB)")
+                print(f"    -> Concluído ({round(file_size / (1024 * 1024), 2)} MB)", flush=True)
+                break
+            except Exception as e:
+                last_err = e
+                print(f"    tentativa {attempt + 1}/3 falhou: {e}", flush=True)
+        else:
+            raise RuntimeError(f"Falha ao baixar {url} após 3 tentativas: {last_err}")
+
         downloaded_paths.append(dest)
 
     return downloaded_paths
@@ -112,27 +142,25 @@ def download_videos(urls: list, input_dir: str = "/workspace/input") -> list:
 def handler(job: dict) -> dict:
     job_input = job.get("input", {})
 
-    # Validação de entrada
+    # Suporte a 'video_urls' (lista) e 'video_url' (singular)
     video_urls = job_input.get("video_urls")
     if not video_urls:
-        # Suporte a chave singular 'video_url'
         single_url = job_input.get("video_url")
         if single_url:
             video_urls = [single_url]
 
     if not video_urls or not isinstance(video_urls, list):
-        return {"error": "Formato inválido. 'video_urls' deve ser uma lista não-vazia de URLs."}
+        return {"error": "Formato inválido. Forneça input.video_urls como lista não-vazia de URLs públicas."}
 
     project_id = str(job_input.get("project_id", job.get("id", f"job_{int(time.time())}")))
 
-    # Parâmetros opcionais de processamento com valores padrão
+    # Parâmetros opcionais com defaults do guia
     fps_rate = str(job_input.get("fps", 2))
     max_iterations = str(job_input.get("max_iterations", 30000))
     sfm_tool = str(job_input.get("sfm_tool", "colmap"))
     matching_method = str(job_input.get("matching_method", "exhaustive"))
     cull_alpha_thresh = str(job_input.get("cull_alpha_thresh", "0.005"))
 
-    # Configuração de variáveis de ambiente para o script bash
     env = os.environ.copy()
     env["FPS_RATE"] = fps_rate
     env["MAX_ITERATIONS"] = max_iterations
@@ -141,28 +169,27 @@ def handler(job: dict) -> dict:
     env["CULL_ALPHA_THRESH"] = cull_alpha_thresh
 
     start_time = time.time()
+    cleanup()  # garante estado limpo no início do job
 
     try:
-        # 1. Download dos vídeos via streaming
+        # 1. Download dos vídeos via streaming com retry
         download_videos(video_urls)
 
-        # 2. Execução do pipeline bash (Extração -> SfM -> Treinamento -> Exportação)
-        print(">>> [Process] Iniciando script de processamento 3DGS...")
+        # 2. Pipeline bash: frames → COLMAP → splatfacto → ns-export → .ply
+        print(">>> [Process] Iniciando pipeline 3DGS...", flush=True)
         subprocess.run(["bash", "/workspace/process.sh"], check=True, env=env)
 
         # 3. Verificação do arquivo gerado
         ply_path = "/workspace/resultado.ply"
         if not os.path.exists(ply_path) or os.path.getsize(ply_path) == 0:
-            return {
-                "error": "O arquivo resultado.ply não foi encontrado ou está vazio após a execução. Verifique os logs de treino."
-            }
+            return {"error": "resultado.ply não encontrado ou vazio. Verifique os logs do worker."}
 
-        # 4. Upload para o Cloudflare R2 / S3
+        # 4. Upload para Cloudflare R2
         object_name = f"splats/{project_id}.ply"
         storage_result = upload_to_storage(ply_path, object_name)
 
         elapsed_minutes = round((time.time() - start_time) / 60, 2)
-        print(f">>> [Job Concluído] Tempo total: {elapsed_minutes} minutos.")
+        print(f">>> [Job Concluído] Tempo total: {elapsed_minutes} minutos.", flush=True)
 
         return {
             "status": "success",
@@ -172,13 +199,15 @@ def handler(job: dict) -> dict:
         }
 
     except subprocess.CalledProcessError as e:
-        error_msg = f"Erro na execução do process.sh (código de saída: {e.returncode})"
-        print(f"ERRO: {error_msg}")
+        error_msg = f"process.sh falhou (exit {e.returncode}). Veja os logs do worker."
+        print(f"ERRO: {error_msg}", flush=True)
         return {"error": error_msg}
     except Exception as e:
-        error_msg = f"Exceção durante processamento: {str(e)}"
-        print(f"ERRO: {error_msg}")
-        return {"error": error_msg}
+        error_msg = f"{type(e).__name__}: {e}"
+        print(f"ERRO: {error_msg}", flush=True)
+        return {"error": error_msg, "trace": traceback.format_exc()[-2000:]}
+    finally:
+        cleanup()  # sempre limpa ao final — crítico para workers reutilizados
 
 
 if __name__ == "__main__":

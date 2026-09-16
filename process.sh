@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 INPUT_DIR="${INPUT_DIR:-/workspace/input}"
 RAW_DIR="${RAW_DIR:-/workspace/raw_frames}"
@@ -11,7 +11,7 @@ RESULT_PLY="${RESULT_PLY:-/workspace/resultado.ply}"
 FPS_RATE="${FPS_RATE:-2}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-30000}"
 SFM_TOOL="${SFM_TOOL:-colmap}"
-MATCHING_METHOD="${MATCHING_METHOD:-exhaustive}"
+MATCHING_METHOD="${MATCHING_METHOD:-exhaustive}"   # exhaustive é o ideal p/ multi-vídeo
 CULL_ALPHA_THRESH="${CULL_ALPHA_THRESH:-0.005}"
 
 echo "=========================================================="
@@ -21,22 +21,24 @@ echo ">>> SfM Tool: ${SFM_TOOL} | Matching: ${MATCHING_METHOD}"
 echo ">>> Max Iterations: ${MAX_ITERATIONS}"
 echo "=========================================================="
 
-# Limpeza de execuções anteriores
+# Limpeza de execuções anteriores (workers serverless são reutilizados entre jobs!)
 rm -rf "$RAW_DIR" "$FORMATTED_DIR" "$OUTPUT_DIR" "$EXPORT_DIR" "$RESULT_PLY"
 mkdir -p "$RAW_DIR" "$FORMATTED_DIR" "$OUTPUT_DIR" "$EXPORT_DIR"
 
+# ---- 1) Extração de frames de N vídeos ----
 echo ">>> [1/4] Extraindo frames dos vídeos a ${FPS_RATE} fps..."
 idx=1
 shopt -s nullglob nocaseglob
 video_count=0
 
-for video in "$INPUT_DIR"/*.{mp4,mov,mkv,avi,webm}; do
+for video in "$INPUT_DIR"/*.{mp4,mov,mkv,avi,webm,MP4,MOV,MKV}; do
   if [ -f "$video" ]; then
-    ((video_count++))
-    vname=$(basename "$video" | cut -f 1 -d '.')
-    echo "    -> Processando vídeo ${idx}: $(basename "$video")"
-    ffmpeg -v error -i "$video" -vf "fps=${FPS_RATE}" -q:v 2 "${RAW_DIR}/vid${idx}_${vname}_%05d.jpg"
-    ((idx++))
+    ((video_count++)) || true
+    vname=$(basename "${video%.*}" | tr -cd '[:alnum:]_-')
+    echo "    -> Processando vídeo ${idx}: $(basename "$video") -> prefixo vid${idx}_${vname}_"
+    ffmpeg -v error -i "$video" -vf "fps=${FPS_RATE}" -q:v 2 \
+      "${RAW_DIR}/vid${idx}_${vname}_%05d.jpg"
+    ((idx++)) || true
   fi
 done
 shopt -u nullglob nocaseglob
@@ -49,19 +51,28 @@ fi
 frame_count=$(ls -1 "$RAW_DIR" 2>/dev/null | wc -l)
 echo ">>> Total de frames extraídos: ${frame_count}"
 
-if [ "$frame_count" -lt 5 ]; then
-  echo "ERRO: Poucos frames gerados (${frame_count}). Mínimo recomendado: 5 frames."
+# Mínimo de 30 frames (recomendado pelo guia para SfM confiável)
+if [ "$frame_count" -lt 30 ]; then
+  echo "ERRO: Poucos frames (${frame_count}). Mínimo: 30. Verifique se os vídeos baixaram corretamente."
   exit 1
 fi
 
-echo ">>> [2/4] Executando SfM (Structure from Motion)..."
+# ---- 2) SfM (COLMAP, matching exaustivo para casar frames ENTRE vídeos) ----
+echo ">>> [2/4] Executando SfM (${SFM_TOOL}, matching=${MATCHING_METHOD})..."
 ns-process-data images \
   --data "$RAW_DIR" \
   --output-dir "$FORMATTED_DIR" \
   --matching-method "$MATCHING_METHOD" \
   --sfm-tool "$SFM_TOOL"
 
-echo ">>> [3/4] Treinando modelo 3DGS (splatfacto)..."
+if [ ! -f "$FORMATTED_DIR/transforms.json" ]; then
+  echo "ERRO: transforms.json não gerado — COLMAP falhou (pouca textura/overlap nos vídeos?)"
+  exit 1
+fi
+echo "✅ SfM OK"
+
+# ---- 3) Treinamento 3DGS ----
+echo ">>> [3/4] Treinando modelo 3DGS (splatfacto, ${MAX_ITERATIONS} iterações)..."
 ns-train splatfacto \
   --data "$FORMATTED_DIR" \
   --output-dir "$OUTPUT_DIR" \
@@ -69,8 +80,9 @@ ns-train splatfacto \
   --pipeline.model.cull-alpha-thresh "$CULL_ALPHA_THRESH" \
   --max-num-iterations "$MAX_ITERATIONS"
 
-echo ">>> [4/4] Exportando arquivo .ply final..."
-CONFIG_PATH=$(find "$OUTPUT_DIR" -name "config.yml" | head -n 1)
+# ---- 4) Exportação para .ply ----
+echo ">>> [4/4] Exportando gaussian-splat para .ply..."
+CONFIG_PATH=$(find "$OUTPUT_DIR" -name "config.yml" | sort -r | head -n 1)
 
 if [ -z "$CONFIG_PATH" ] || [ ! -f "$CONFIG_PATH" ]; then
   echo "ERRO: config.yml do modelo treinado não foi encontrado em ${OUTPUT_DIR}."
@@ -82,19 +94,17 @@ ns-export gaussian-splat \
   --load-config "$CONFIG_PATH" \
   --output-dir "$EXPORT_DIR"
 
+# Localiza o .ply gerado (nome principal ou qualquer .ply como fallback)
 if [ -f "$EXPORT_DIR/splat.ply" ]; then
   cp "$EXPORT_DIR/splat.ply" "$RESULT_PLY"
-  echo ">>> Sucesso! Arquivo gerado em ${RESULT_PLY} ($(du -h "$RESULT_PLY" | cut -f1))"
 else
-  # Tenta localizar qualquer .ply gerado pelo export
   ANY_PLY=$(find "$EXPORT_DIR" -name "*.ply" | head -n 1)
   if [ -n "$ANY_PLY" ] && [ -f "$ANY_PLY" ]; then
     cp "$ANY_PLY" "$RESULT_PLY"
-    echo ">>> Sucesso! Arquivo gerado em ${RESULT_PLY} ($(du -h "$RESULT_PLY" | cut -f1))"
   else
     echo "ERRO: splat.ply não encontrado em ${EXPORT_DIR} após ns-export."
     exit 1
   fi
 fi
 
-echo ">>> Pipeline Finalizado com Sucesso."
+echo ">>> Pipeline Finalizado com Sucesso! Arquivo: ${RESULT_PLY} ($(du -h "$RESULT_PLY" | cut -f1))"
